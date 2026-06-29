@@ -308,6 +308,7 @@ static void handle_tcp(int tap_fd, struct eth_hdr *eth, struct ipv4_hdr *ip,
                        uint8_t ip_header_len, uint16_t total_len)
 {
     size_t tcp_len;
+    size_t tcp_payload_len;
     struct tcp_hdr *tcp;
     uint8_t tcp_header_len;
 
@@ -330,6 +331,8 @@ static void handle_tcp(int tap_fd, struct eth_hdr *eth, struct ipv4_hdr *ip,
         return;
     }
 
+    tcp_payload_len = tcp_len - tcp_header_len;
+
     printf("    TCP source port:      %u\n", ntohs(tcp->sport));
     printf("    TCP destination port: %u\n", ntohs(tcp->dport));
     printf("    TCP sequence:         %u\n", ntohl(tcp->seq));
@@ -340,6 +343,7 @@ static void handle_tcp(int tap_fd, struct eth_hdr *eth, struct ipv4_hdr *ip,
     printf("\n");
     printf("    TCP window:           %u\n", ntohs(tcp->window));
     printf("    TCP checksum:         0x%04x\n", ntohs(tcp->checksum));
+    printf("    TCP payload length:   %zu bytes\n", tcp_payload_len);
 
     if (ip->daddr != stack_ip) {
         printf("    TCP segment not for us\n");
@@ -348,6 +352,8 @@ static void handle_tcp(int tap_fd, struct eth_hdr *eth, struct ipv4_hdr *ip,
 
     if ((tcp->flags & TCP_SYN) && !(tcp->flags & TCP_ACK)) {
         send_tcp_syn_ack(tap_fd, eth, ip, tcp, ip_header_len);
+    } else if ((tcp->flags & TCP_ACK) && tcp_payload_len == 0) {
+        printf("    TCP handshake ACK received\n");
     }
 }
 
