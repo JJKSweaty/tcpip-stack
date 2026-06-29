@@ -248,6 +248,29 @@ static void print_tcp_flags(uint8_t flags)
     }
 }
 
+static void print_tcp_payload(uint8_t *payload, size_t payload_len)
+{
+    size_t i;
+
+    printf("    TCP payload:          ");
+
+    for (i = 0; i < payload_len; i++) {
+        uint8_t c = payload[i];
+
+        if (c >= 32 && c <= 126) {
+            putchar(c);
+        } else if (c == '\n') {
+            printf("\\n");
+        } else if (c == '\r') {
+            printf("\\r");
+        } else {
+            putchar('.');
+        }
+    }
+
+    printf("\n");
+}
+
 static uint16_t tcp_checksum(struct ipv4_hdr *ip, struct tcp_hdr *tcp, size_t tcp_len)
 {
     uint8_t buf[sizeof(struct tcp_pseudo_hdr) + sizeof(struct tcp_hdr)];
@@ -344,6 +367,10 @@ static void handle_tcp(int tap_fd, struct eth_hdr *eth, struct ipv4_hdr *ip,
     printf("    TCP window:           %u\n", ntohs(tcp->window));
     printf("    TCP checksum:         0x%04x\n", ntohs(tcp->checksum));
     printf("    TCP payload length:   %zu bytes\n", tcp_payload_len);
+
+    if (tcp_payload_len > 0) {
+        print_tcp_payload((uint8_t *)tcp + tcp_header_len, tcp_payload_len);
+    }
 
     if (ip->daddr != stack_ip) {
         printf("    TCP segment not for us\n");
