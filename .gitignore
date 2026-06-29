@@ -1,3 +1,5 @@
 tcpip-stack
 *.o
 .vscode/
+context/
+AGENTS.md

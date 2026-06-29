@@ -26,13 +26,26 @@
 #define BUFLEN 1600
 #define ETH_HDR_LEN 14
 #define STACK_IP "10.0.0.2"
+#define ICMP_ECHO_REPLY 0
+#define ICMP_ECHO_REQUEST 8
 static uint32_t stack_ip;
 static uint8_t stack_mac[6] = {
     0x02, 0x00, 0x00, 0x00, 0x00, 0x02
 };
 
-static void handle_ipv4(uint8_t *buf, ssize_t nread);
 
+struct icmp_v4 {
+    uint8_t type;
+    uint8_t code;
+    uint16_t checksum;
+    uint8_t data[];
+} __attribute__((packed));
+
+struct icmp_v4_echo {
+    uint16_t id;
+    uint16_t seq;
+    uint8_t data[];
+} __attribute__((packed));
 struct eth_hdr {
     uint8_t dmac[6];
     uint8_t smac[6];
@@ -69,7 +82,8 @@ struct ipv4_hdr {
     uint32_t daddr;
     uint8_t payload[];
 } __attribute__((packed));
-
+static void handle_icmp(struct ipv4_hdr *ip, uint8_t ip_header_len, uint16_t total_len);
+static void handle_ipv4(uint8_t *buf, ssize_t nread);
 static void print_ip(uint32_t ip)
 {
     struct in_addr addr;
@@ -77,6 +91,45 @@ static void print_ip(uint32_t ip)
 
     printf("%s", inet_ntoa(addr));
 }
+static void handle_icmp(struct ipv4_hdr *ip, uint8_t ip_header_len, uint16_t total_len)
+{
+    struct icmp_v4 *icmp;
+    struct icmp_v4_echo *echo;
+    size_t icmp_len;
+
+    if (total_len < ip_header_len + sizeof(struct icmp_v4)) {
+    printf("    ICMP packet too short\n");
+    return;
+}
+    icmp_len = total_len - ip_header_len;
+    icmp = (struct icmp_v4 *)((uint8_t *)ip + ip_header_len);
+
+    printf("    ICMP type:      %u", icmp->type);
+
+    if (icmp->type == ICMP_ECHO_REQUEST) {
+    printf(" (echo request)\n");
+    } else if (icmp->type == ICMP_ECHO_REPLY) {
+    printf(" (echo reply)\n");
+    } else {
+    printf(" (other)\n");
+    }
+    printf("    ICMP code:      %u\n", icmp->code);
+    printf("    ICMP checksum:  0x%04x\n", ntohs(icmp->checksum));
+    if (icmp->type != ICMP_ECHO_REQUEST && icmp->type != ICMP_ECHO_REPLY) {
+    return;
+}
+
+    if (icmp_len < sizeof(struct icmp_v4) + sizeof(struct icmp_v4_echo)) {
+    printf("    ICMP echo data too short\n");
+    return;
+}
+    echo = (struct icmp_v4_echo *)icmp->data;
+
+    printf("    Echo id:        %u\n", ntohs(echo->id));
+    printf("    Echo sequence:  %u\n", ntohs(echo->seq));
+}   
+
+
 static void send_arp_reply(int tap_fd,
                            struct eth_hdr *req_eth,
                            struct arp_ipv4 *req_data)
@@ -290,6 +343,7 @@ static void handle_ipv4(uint8_t *buf, ssize_t nread)
 
     if (ip->proto == IP_PROTO_ICMP) {
         printf(" (ICMP)\n");
+        handle_icmp(ip, ip_header_len, total_len);
     } else if (ip->proto == IP_PROTO_TCP) {
         printf(" (TCP)\n");
     } else if (ip->proto == IP_PROTO_UDP) {
