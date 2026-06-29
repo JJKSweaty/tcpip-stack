@@ -13,6 +13,10 @@
 #include <arpa/inet.h>
 #include <errno.h>
 
+#define IPV4_MIN_HDR_LEN 20
+#define IP_PROTO_ICMP 1
+#define IP_PROTO_TCP  6
+#define IP_PROTO_UDP  17
 #define ETH_P_IP   0x0800
 #define ETH_P_ARP  0x0806
 #define ARP_HTYPE_ETHERNET 0x0001
@@ -26,6 +30,9 @@ static uint32_t stack_ip;
 static uint8_t stack_mac[6] = {
     0x02, 0x00, 0x00, 0x00, 0x00, 0x02
 };
+
+static void handle_ipv4(uint8_t *buf, ssize_t nread);
+
 struct eth_hdr {
     uint8_t dmac[6];
     uint8_t smac[6];
@@ -47,6 +54,20 @@ struct arp_ipv4 {
     uint32_t sip;
     uint8_t dmac[6];
     uint32_t dip;
+} __attribute__((packed));
+
+struct ipv4_hdr {
+    uint8_t version_ihl;
+    uint8_t tos;
+    uint16_t total_len;
+    uint16_t id;
+    uint16_t frag_offset;
+    uint8_t ttl;
+    uint8_t proto;
+    uint16_t checksum;
+    uint32_t saddr;
+    uint32_t daddr;
+    uint8_t payload[];
 } __attribute__((packed));
 
 static void print_ip(uint32_t ip)
@@ -135,7 +156,9 @@ static void print_mac(uint8_t mac[6])
 }
 static void handle_arp(int tap_fd, uint8_t *buf, ssize_t nread)
 {
-    if (nread < ETH_HDR_LEN + sizeof(struct arp_hdr) + sizeof(struct arp_ipv4)) {
+    size_t arp_frame_len = ETH_HDR_LEN + sizeof(struct arp_hdr) + sizeof(struct arp_ipv4);
+
+    if ((size_t)nread < arp_frame_len) {
         printf("ARP frame too short: %zd bytes\n", nread);
         return;
     }
@@ -186,6 +209,7 @@ static void handle_arp(int tap_fd, uint8_t *buf, ssize_t nread)
     printf("    Result: ignored ARP packet\n");
 }
 }
+
 static void handle_frame(int tap_fd, uint8_t *buf, ssize_t nread)
 {
     if (nread < ETH_HDR_LEN) {
@@ -211,12 +235,69 @@ static void handle_frame(int tap_fd, uint8_t *buf, ssize_t nread)
     if (ethertype == ETH_P_ARP) {
     handle_arp(tap_fd, buf, nread);
     }else if (ethertype == ETH_P_IP) {
-        printf("  IPv4 packet, ignoring for now\n");
+        handle_ipv4(buf, nread);
     } else {
         printf("  Unknown EtherType, ignoring for now\n");
     }
 }
 
+static void handle_ipv4(uint8_t *buf, ssize_t nread)
+{
+    if ((size_t)nread < ETH_HDR_LEN + IPV4_MIN_HDR_LEN) {
+        printf("  IPv4 frame too short: %zd bytes\n", nread);
+        return;
+    }
+
+    struct eth_hdr *eth = (struct eth_hdr *)buf;
+    struct ipv4_hdr *ip = (struct ipv4_hdr *)eth->payload;
+
+    uint8_t version = ip->version_ihl >> 4;
+    uint8_t ihl = ip->version_ihl & 0x0f;
+    uint8_t ip_header_len = ihl * 4;
+
+    if (version != 4) {
+        printf("  Not IPv4, version=%u\n", version);
+        return;
+    }
+
+    if (ip_header_len < IPV4_MIN_HDR_LEN) {
+        printf("  Invalid IPv4 header length: %u\n", ip_header_len);
+        return;
+    }
+
+    if ((size_t)nread < (size_t)ETH_HDR_LEN + ip_header_len) {
+        printf("  IPv4 packet truncated\n");
+        return;
+    }
+
+    uint16_t total_len = ntohs(ip->total_len);
+
+    printf("  IPv4 packet\n");
+
+    printf("    Source IP:      ");
+    print_ip(ip->saddr);
+    printf("\n");
+
+    printf("    Destination IP: ");
+    print_ip(ip->daddr);
+    printf("\n");
+
+    printf("    Header length:  %u bytes\n", ip_header_len);
+    printf("    Total length:   %u bytes\n", total_len);
+    printf("    TTL:            %u\n", ip->ttl);
+
+    printf("    Protocol:       %u", ip->proto);
+
+    if (ip->proto == IP_PROTO_ICMP) {
+        printf(" (ICMP)\n");
+    } else if (ip->proto == IP_PROTO_TCP) {
+        printf(" (TCP)\n");
+    } else if (ip->proto == IP_PROTO_UDP) {
+        printf(" (UDP)\n");
+    } else {
+        printf(" (unknown)\n");
+    }
+}
 
 static int tap_alloc(char *dev)
 {
