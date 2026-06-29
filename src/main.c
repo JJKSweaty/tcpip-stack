@@ -28,6 +28,12 @@
 #define STACK_IP "10.0.0.2"
 #define ICMP_ECHO_REPLY 0
 #define ICMP_ECHO_REQUEST 8
+#define TCP_FIN 0x01
+#define TCP_SYN 0x02
+#define TCP_RST 0x04
+#define TCP_PSH 0x08
+#define TCP_ACK 0x10
+#define TCP_URG 0x20
 static uint32_t stack_ip;
 static uint8_t stack_mac[6] = {
     0x02, 0x00, 0x00, 0x00, 0x00, 0x02
@@ -46,6 +52,20 @@ struct icmp_v4_echo {
     uint16_t seq;
     uint8_t data[];
 } __attribute__((packed));
+
+struct tcp_hdr {
+    uint16_t sport;
+    uint16_t dport;
+    uint32_t seq;
+    uint32_t ack;
+    uint8_t offset_reserved;
+    uint8_t flags;
+    uint16_t window;
+    uint16_t checksum;
+    uint16_t urgent;
+    uint8_t data[];
+} __attribute__((packed));
+
 struct eth_hdr {
     uint8_t dmac[6];
     uint8_t smac[6];
@@ -82,8 +102,10 @@ struct ipv4_hdr {
     uint32_t daddr;
     uint8_t payload[];
 } __attribute__((packed));
-static void handle_icmp(struct ipv4_hdr *ip, uint8_t ip_header_len, uint16_t total_len);
-static void handle_ipv4(uint8_t *buf, ssize_t nread);
+static void handle_icmp(int tap_fd, struct eth_hdr *eth, struct ipv4_hdr *ip,
+                        uint8_t ip_header_len, uint16_t total_len);
+static void handle_ipv4(int tap_fd, uint8_t *buf, ssize_t nread);
+static void handle_tcp(struct ipv4_hdr *ip, uint8_t ip_header_len, uint16_t total_len);
 static void print_ip(uint32_t ip)
 {
     struct in_addr addr;
@@ -91,7 +113,61 @@ static void print_ip(uint32_t ip)
 
     printf("%s", inet_ntoa(addr));
 }
-static void handle_icmp(struct ipv4_hdr *ip, uint8_t ip_header_len, uint16_t total_len)
+static uint16_t checksum(void *data, size_t len)
+{
+    uint32_t sum = 0;
+    uint16_t *word = data;
+
+    while (len > 1) {
+        sum += *word++;
+        len -= 2;
+    }
+
+    if (len == 1) {
+        sum += *(uint8_t *)word;
+    }
+
+    while (sum >> 16) {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+
+    return ~sum;
+}
+
+static void send_icmp_echo_reply(int tap_fd, struct eth_hdr *eth,
+                                 struct ipv4_hdr *ip,
+                                 uint8_t ip_header_len,
+                                 uint16_t total_len)
+{
+    size_t icmp_len = total_len - ip_header_len;
+    struct icmp_v4 *icmp = (struct icmp_v4 *)((uint8_t *)ip + ip_header_len);
+    uint32_t original_src_ip = ip->saddr;
+    ssize_t frame_len = ETH_HDR_LEN + total_len;
+
+    memcpy(eth->dmac, eth->smac, 6);
+    memcpy(eth->smac, stack_mac, 6);
+
+    ip->saddr = stack_ip;
+    ip->daddr = original_src_ip;
+    ip->ttl = 64;
+    ip->checksum = 0;
+    ip->checksum = checksum(ip, ip_header_len);
+
+    icmp->type = ICMP_ECHO_REPLY;
+    icmp->code = 0;
+    icmp->checksum = 0;
+    icmp->checksum = checksum(icmp, icmp_len);
+
+    if (write(tap_fd, eth, frame_len) < 0) {
+        perror("write ICMP echo reply");
+        return;
+    }
+
+    printf("    Sent ICMP echo reply\n");
+}
+
+static void handle_icmp(int tap_fd, struct eth_hdr *eth, struct ipv4_hdr *ip,
+                        uint8_t ip_header_len, uint16_t total_len)
 {
     struct icmp_v4 *icmp;
     struct icmp_v4_echo *echo;
@@ -127,7 +203,77 @@ static void handle_icmp(struct ipv4_hdr *ip, uint8_t ip_header_len, uint16_t tot
 
     printf("    Echo id:        %u\n", ntohs(echo->id));
     printf("    Echo sequence:  %u\n", ntohs(echo->seq));
+
+    if (icmp->type != ICMP_ECHO_REQUEST) {
+        return;
+    }
+
+    if (ip->daddr != stack_ip) {
+        printf("    ICMP echo request not for us\n");
+        return;
+    }
+
+    send_icmp_echo_reply(tap_fd, eth, ip, ip_header_len, total_len);
 }   
+
+static void print_tcp_flags(uint8_t flags)
+{
+    if (flags & TCP_FIN) {
+        printf(" FIN");
+    }
+    if (flags & TCP_SYN) {
+        printf(" SYN");
+    }
+    if (flags & TCP_RST) {
+        printf(" RST");
+    }
+    if (flags & TCP_PSH) {
+        printf(" PSH");
+    }
+    if (flags & TCP_ACK) {
+        printf(" ACK");
+    }
+    if (flags & TCP_URG) {
+        printf(" URG");
+    }
+}
+
+static void handle_tcp(struct ipv4_hdr *ip, uint8_t ip_header_len, uint16_t total_len)
+{
+    size_t tcp_len;
+    struct tcp_hdr *tcp;
+    uint8_t tcp_header_len;
+
+    if (total_len < ip_header_len + sizeof(struct tcp_hdr)) {
+        printf("    TCP segment too short\n");
+        return;
+    }
+
+    tcp_len = total_len - ip_header_len;
+    tcp = (struct tcp_hdr *)((uint8_t *)ip + ip_header_len);
+    tcp_header_len = (tcp->offset_reserved >> 4) * 4;
+
+    if (tcp_header_len < sizeof(struct tcp_hdr)) {
+        printf("    Invalid TCP header length: %u\n", tcp_header_len);
+        return;
+    }
+
+    if (tcp_len < tcp_header_len) {
+        printf("    TCP segment truncated\n");
+        return;
+    }
+
+    printf("    TCP source port:      %u\n", ntohs(tcp->sport));
+    printf("    TCP destination port: %u\n", ntohs(tcp->dport));
+    printf("    TCP sequence:         %u\n", ntohl(tcp->seq));
+    printf("    TCP acknowledgment:   %u\n", ntohl(tcp->ack));
+    printf("    TCP header length:    %u bytes\n", tcp_header_len);
+    printf("    TCP flags:            0x%02x", tcp->flags);
+    print_tcp_flags(tcp->flags);
+    printf("\n");
+    printf("    TCP window:           %u\n", ntohs(tcp->window));
+    printf("    TCP checksum:         0x%04x\n", ntohs(tcp->checksum));
+}
 
 
 static void send_arp_reply(int tap_fd,
@@ -288,13 +434,13 @@ static void handle_frame(int tap_fd, uint8_t *buf, ssize_t nread)
     if (ethertype == ETH_P_ARP) {
     handle_arp(tap_fd, buf, nread);
     }else if (ethertype == ETH_P_IP) {
-        handle_ipv4(buf, nread);
+        handle_ipv4(tap_fd, buf, nread);
     } else {
         printf("  Unknown EtherType, ignoring for now\n");
     }
 }
 
-static void handle_ipv4(uint8_t *buf, ssize_t nread)
+static void handle_ipv4(int tap_fd, uint8_t *buf, ssize_t nread)
 {
     if ((size_t)nread < ETH_HDR_LEN + IPV4_MIN_HDR_LEN) {
         printf("  IPv4 frame too short: %zd bytes\n", nread);
@@ -325,6 +471,16 @@ static void handle_ipv4(uint8_t *buf, ssize_t nread)
 
     uint16_t total_len = ntohs(ip->total_len);
 
+    if (total_len < ip_header_len) {
+        printf("  Invalid IPv4 total length: %u\n", total_len);
+        return;
+    }
+
+    if ((size_t)nread < (size_t)ETH_HDR_LEN + total_len) {
+        printf("  IPv4 packet truncated\n");
+        return;
+    }
+
     printf("  IPv4 packet\n");
 
     printf("    Source IP:      ");
@@ -343,9 +499,10 @@ static void handle_ipv4(uint8_t *buf, ssize_t nread)
 
     if (ip->proto == IP_PROTO_ICMP) {
         printf(" (ICMP)\n");
-        handle_icmp(ip, ip_header_len, total_len);
+        handle_icmp(tap_fd, eth, ip, ip_header_len, total_len);
     } else if (ip->proto == IP_PROTO_TCP) {
         printf(" (TCP)\n");
+        handle_tcp(ip, ip_header_len, total_len);
     } else if (ip->proto == IP_PROTO_UDP) {
         printf(" (UDP)\n");
     } else {
