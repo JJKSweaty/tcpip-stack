@@ -34,6 +34,7 @@
 #define TCP_PSH 0x08
 #define TCP_ACK 0x10
 #define TCP_URG 0x20
+#define TCP_INITIAL_SEQ 1000
 static uint32_t stack_ip;
 static uint8_t stack_mac[6] = {
     0x02, 0x00, 0x00, 0x00, 0x00, 0x02
@@ -64,6 +65,14 @@ struct tcp_hdr {
     uint16_t checksum;
     uint16_t urgent;
     uint8_t data[];
+} __attribute__((packed));
+
+struct tcp_pseudo_hdr {
+    uint32_t saddr;
+    uint32_t daddr;
+    uint8_t zero;
+    uint8_t proto;
+    uint16_t tcp_len;
 } __attribute__((packed));
 
 struct eth_hdr {
@@ -105,7 +114,8 @@ struct ipv4_hdr {
 static void handle_icmp(int tap_fd, struct eth_hdr *eth, struct ipv4_hdr *ip,
                         uint8_t ip_header_len, uint16_t total_len);
 static void handle_ipv4(int tap_fd, uint8_t *buf, ssize_t nread);
-static void handle_tcp(struct ipv4_hdr *ip, uint8_t ip_header_len, uint16_t total_len);
+static void handle_tcp(int tap_fd, struct eth_hdr *eth, struct ipv4_hdr *ip,
+                       uint8_t ip_header_len, uint16_t total_len);
 static void print_ip(uint32_t ip)
 {
     struct in_addr addr;
@@ -238,7 +248,64 @@ static void print_tcp_flags(uint8_t flags)
     }
 }
 
-static void handle_tcp(struct ipv4_hdr *ip, uint8_t ip_header_len, uint16_t total_len)
+static uint16_t tcp_checksum(struct ipv4_hdr *ip, struct tcp_hdr *tcp, size_t tcp_len)
+{
+    uint8_t buf[sizeof(struct tcp_pseudo_hdr) + sizeof(struct tcp_hdr)];
+    struct tcp_pseudo_hdr *pseudo = (struct tcp_pseudo_hdr *)buf;
+
+    pseudo->saddr = ip->saddr;
+    pseudo->daddr = ip->daddr;
+    pseudo->zero = 0;
+    pseudo->proto = IP_PROTO_TCP;
+    pseudo->tcp_len = htons(tcp_len);
+
+    memcpy(buf + sizeof(struct tcp_pseudo_hdr), tcp, tcp_len);
+
+    return checksum(buf, sizeof(struct tcp_pseudo_hdr) + tcp_len);
+}
+
+static void send_tcp_syn_ack(int tap_fd, struct eth_hdr *eth,
+                             struct ipv4_hdr *ip, struct tcp_hdr *tcp,
+                             uint8_t ip_header_len)
+{
+    uint32_t original_src_ip = ip->saddr;
+    uint16_t original_sport = tcp->sport;
+    uint32_t original_seq = ntohl(tcp->seq);
+    uint16_t tcp_len = sizeof(struct tcp_hdr);
+    uint16_t total_len = ip_header_len + tcp_len;
+    ssize_t frame_len = ETH_HDR_LEN + total_len;
+
+    memcpy(eth->dmac, eth->smac, 6);
+    memcpy(eth->smac, stack_mac, 6);
+
+    ip->saddr = stack_ip;
+    ip->daddr = original_src_ip;
+    ip->ttl = 64;
+    ip->total_len = htons(total_len);
+    ip->checksum = 0;
+    ip->checksum = checksum(ip, ip_header_len);
+
+    tcp->sport = tcp->dport;
+    tcp->dport = original_sport;
+    tcp->seq = htonl(TCP_INITIAL_SEQ);
+    tcp->ack = htonl(original_seq + 1);
+    tcp->offset_reserved = (sizeof(struct tcp_hdr) / 4) << 4;
+    tcp->flags = TCP_SYN | TCP_ACK;
+    tcp->window = htons(65535);
+    tcp->urgent = 0;
+    tcp->checksum = 0;
+    tcp->checksum = tcp_checksum(ip, tcp, tcp_len);
+
+    if (write(tap_fd, eth, frame_len) < 0) {
+        perror("write TCP SYN-ACK");
+        return;
+    }
+
+    printf("    Sent TCP SYN-ACK\n");
+}
+
+static void handle_tcp(int tap_fd, struct eth_hdr *eth, struct ipv4_hdr *ip,
+                       uint8_t ip_header_len, uint16_t total_len)
 {
     size_t tcp_len;
     struct tcp_hdr *tcp;
@@ -273,6 +340,15 @@ static void handle_tcp(struct ipv4_hdr *ip, uint8_t ip_header_len, uint16_t tota
     printf("\n");
     printf("    TCP window:           %u\n", ntohs(tcp->window));
     printf("    TCP checksum:         0x%04x\n", ntohs(tcp->checksum));
+
+    if (ip->daddr != stack_ip) {
+        printf("    TCP segment not for us\n");
+        return;
+    }
+
+    if ((tcp->flags & TCP_SYN) && !(tcp->flags & TCP_ACK)) {
+        send_tcp_syn_ack(tap_fd, eth, ip, tcp, ip_header_len);
+    }
 }
 
 
@@ -502,7 +578,7 @@ static void handle_ipv4(int tap_fd, uint8_t *buf, ssize_t nread)
         handle_icmp(tap_fd, eth, ip, ip_header_len, total_len);
     } else if (ip->proto == IP_PROTO_TCP) {
         printf(" (TCP)\n");
-        handle_tcp(ip, ip_header_len, total_len);
+        handle_tcp(tap_fd, eth, ip, ip_header_len, total_len);
     } else if (ip->proto == IP_PROTO_UDP) {
         printf(" (UDP)\n");
     } else {
