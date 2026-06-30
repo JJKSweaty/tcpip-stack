@@ -6,8 +6,6 @@ This project follows Saminiir's "Let's code a TCP/IP stack" series as a
 learning path, then grows it into a clear educational codebase that can become
 a public reference, portfolio project, and tutorial series.
 
-
-
 ## Packet Path
 
 Packets enter from the TAP device as Ethernet frames:
@@ -18,6 +16,7 @@ TAP device
      -> ARP packet
      -> IPv4 packet
         -> ICMP packet
+        -> UDP datagram
         -> TCP segment
            -> TCP payload bytes
 ```
@@ -31,6 +30,7 @@ src/ethernet.c    Ethernet parsing and dispatch
 src/arp.c         ARP request parsing and replies
 src/ipv4.c        IPv4 parsing and protocol dispatch
 src/icmp.c        ICMP echo request/reply handling
+src/udp.c         UDP parsing and echo replies
 src/tcp.c         minimal TCP state, data response, retransmission timer
 src/checksum.c    Internet checksum helper
 ```
@@ -47,6 +47,9 @@ The matching headers live in `include/`.
 - ARP request parsing and ARP replies
 - IPv4 packet parsing
 - ICMP echo replies for `ping`
+- UDP header parsing
+- UDP payload receive and print
+- UDP echo replies using the same payload bytes
 - TCP header parsing
 - Minimal TCP SYN, SYN-ACK, ACK handshake
 - TCP payload receive and print
@@ -65,9 +68,32 @@ The matching headers live in `include/`.
 - TCP receive window management
 - Out-of-order TCP segments
 - Real socket API integration
-- UDP
+- UDP sockets or port binding
+- UDP fragmentation/reassembly
 - IPv6
 - Automated packet-level tests
+
+## How The Layers Fit Together
+
+Ethernet is the outer layer. It tells the stack whether the payload is ARP or
+IPv4 by reading the EtherType field.
+
+ARP is used before IP traffic can work. Linux asks, "Who has `10.0.0.2`?" and
+the stack replies with `02:00:00:00:00:02`.
+
+IPv4 is the next dispatcher. It checks the IPv4 header and then sends the
+payload to ICMP, UDP, or TCP based on the protocol number.
+
+ICMP is used by `ping`. The stack changes an echo request into an echo reply
+and sends it back.
+
+UDP is connectionless. There is no handshake, sequence number, or retransmission
+queue. This stack prints the UDP header and payload, then sends the same payload
+back as a UDP echo reply.
+
+TCP is stateful. This stack keeps one tiny connection control block, performs a
+minimal handshake, replies with `stack received\n`, handles FIN close, and keeps
+one outbound payload queued for retransmission.
 
 ## Build
 
@@ -152,6 +178,23 @@ stack received
 The stack should print the TCP handshake, payload bytes, ACK advancement, and
 connection close path.
 
+## UDP Test
+
+Terminal 2:
+
+```bash
+printf 'hello udp\n' | nc -u -w 1 10.0.0.2 1337
+```
+
+Expected client output:
+
+```text
+hello udp
+```
+
+The stack should print the UDP source port, destination port, length, checksum,
+payload bytes, and echo reply message.
+
 ## Retransmission Test Idea
 
 Use a temporary firewall rule to drop ACKs on `tap0`, then run the TCP test and
@@ -168,5 +211,5 @@ after the test.
 - Add packet walkthroughs with captured bytes and screenshots
 - Add TCP options
 - Add multi-connection support
-- Add UDP
+- Add fuller UDP examples, such as simple request/response protocols
 - Explore IPv6 later

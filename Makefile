@@ -10,6 +10,7 @@ SRC = \
 	src/arp.c \
 	src/ipv4.c \
 	src/icmp.c \
+	src/udp.c \
 	src/tcp.c
 
 OBJ = $(SRC:.c=.o)

@@ -5,6 +5,7 @@
 #include "icmp.h"
 #include "ipv4.h"
 #include "tcp.h"
+#include "udp.h"
 
 void print_ip(uint32_t ip)
 {
@@ -86,6 +87,7 @@ void handle_ipv4(int tap_fd, uint8_t *buf, ssize_t nread)
         handle_tcp(tap_fd, eth, ip, ip_header_len, total_len);
     } else if (ip->proto == IP_PROTO_UDP) {
         printf(" (UDP)\n");
+        handle_udp(tap_fd, eth, ip, ip_header_len, total_len);
     } else {
         printf(" (unknown)\n");
     }
