@@ -2,9 +2,6 @@
 
 A small userspace TCP/IP stack in C on Linux/WSL2 using a TAP device.
 
-This project follows Saminiir's "Let's code a TCP/IP stack" series as a
-learning path, then grows it into a clear educational codebase that can become
-a public reference, portfolio project, and tutorial series.
 
 ## Packet Path
 
@@ -203,6 +200,7 @@ watch the stack log its retransmission queue, timeout, and RTO backoff.
 Do this manually because it changes the host network namespace. Remove the rule
 after the test.
 
+
 ## Roadmap
 
 - Continue cleaning file structure as the stack grows
@@ -213,3 +211,7 @@ after the test.
 - Add multi-connection support
 - Add fuller UDP examples, such as simple request/response protocols
 - Explore IPv6 later
+
+## References
+Saminiir's "Let's code a TCP/IP stack" series as a
+learning path.
